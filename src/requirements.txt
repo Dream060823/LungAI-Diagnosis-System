@@ -1,0 +1,10 @@
+torch
+torchvision
+pydicom
+opencv-python
+numpy
+matplotlib
+pillow
+pytorch-grad-cam
+flask
+flask-cors
