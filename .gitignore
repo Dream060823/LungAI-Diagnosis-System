@@ -217,8 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# === ???? ===
-  archive/
-  test_results/
-  models/*.pth
-  data/
+# === project specific ===
+archive/
+test_results/
+models/*.pth
+data/
