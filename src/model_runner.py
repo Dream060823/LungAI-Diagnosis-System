@@ -6,13 +6,11 @@ AI 推理入口 - 林钟鑫实现
 
 import time
 import base64
-import io
 import torchvision.models as models
 import torch
 import pydicom
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from pytorch_grad_cam import GradCAM
 from pytorch_grad_cam.utils.image import show_cam_on_image
 from pathlib import Path
@@ -28,7 +26,7 @@ def get_model():
     """加载模型（只加载一次，避免重复加载）"""
     global _model
     if _model is None:
-        _model = models.resnet50(pretrained=False)
+        _model = models.resnet50(weights=None)
         num_features = _model.fc.in_features
         # 使用与训练时相同的3层结构
         _model.fc = torch.nn.Sequential(
@@ -40,7 +38,7 @@ def get_model():
             torch.nn.Dropout(0.5),
             torch.nn.Linear(128, 2)
         )
-        _model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu'))
+        _model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu', weights_only=True))
         _model.eval()
     return _model
 
@@ -63,7 +61,7 @@ def preprocess_dicom(dcm_path):
     dicom_metadata = {
         "rows": getattr(ds, 'Rows', 512),
         "columns": getattr(ds, 'Columns', 512),
-        "pixel_spacing": getattr(ds, 'PixelSpacing', [1.0, 1.0]),
+        "pixel_spacing": [float(v) for v in getattr(ds, 'PixelSpacing', [1.0, 1.0])],
         "slice_thickness": getattr(ds, 'SliceThickness', 1.0),
     }
 
@@ -91,6 +89,10 @@ def preprocess_dicom(dcm_path):
     # 转成张量
     tensor_image = ct_image.transpose(2, 0, 1) / 255.0
     tensor = torch.FloatTensor(tensor_image).unsqueeze(0)
+    # ImageNet 标准化（与训练时一致）
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    tensor = (tensor - mean) / std
 
     return tensor, original_image, dicom_metadata
 
@@ -117,32 +119,35 @@ def predict(model, input_tensor):
 
 # ==================== CAM 热力图 ====================
 
-def generate_cam_base64(model, input_tensor, original_image):
+def generate_cam_base64(model, input_tensor, dicom_metadata):
     """
     生成 CAM 热力图，返回 base64 编码的 PNG 图片
 
+    参数：
+        model: 加载好的模型
+        input_tensor: 模型输入张量 (1, 3, 224, 224)
+        dicom_metadata: DICOM 元数据（含原始尺寸灰度图）
+
     返回：
-        tuple: (base64字符串, 原始热力图numpy数组)
+        tuple: (base64字符串, 原始热力图numpy数组 (224,224))
     """
     target_layer = model.layer4[-1]
     cam = GradCAM(model=model, target_layers=[target_layer])
     grayscale_cam = cam(input_tensor=input_tensor)
     grayscale_cam = grayscale_cam[0, :]
-    visualization = show_cam_on_image(original_image, grayscale_cam, use_rgb=True)
 
-    # 转成 base64
-    img_array = (visualization * 255).astype(np.uint8)
-    img_pil = plt.figure(frameon=False)
-    ax = plt.Axes(img_pil, [0., 0., 1., 1.])
-    ax.set_axis_off()
-    img_pil.add_axes(ax)
-    ax.imshow(img_array)
+    # 用原始 DICOM 尺寸生成 CAM 叠加图，与前端显示匹配
+    original_h = dicom_metadata["rows"]
+    original_w = dicom_metadata["columns"]
+    orig_gray = dicom_metadata["original_image"]
+    orig_rgb = cv2.cvtColor(orig_gray, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+    cam_resized = cv2.resize(grayscale_cam, (original_w, original_h))
+    visualization = show_cam_on_image(orig_rgb, cam_resized, use_rgb=True)
 
-    buffer = io.BytesIO()
-    img_pil.savefig(buffer, format='png', dpi=300, bbox_inches='tight', pad_inches=0)
-    plt.close(img_pil)
-    buffer.seek(0)
-    img_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+    # 转成 base64（show_cam_on_image 返回 uint8，不需要再乘255）
+    visualization_bgr = cv2.cvtColor(visualization, cv2.COLOR_RGB2BGR)
+    _, buffer = cv2.imencode('.png', visualization_bgr)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
 
     return img_base64, grayscale_cam
 
@@ -301,7 +306,7 @@ def detect_nodules(stored_path: str) -> dict:
     pred_result = predict(model, input_tensor)
 
     # 3. 生成 CAM 热力图（同时返回原始热力图数据用于定位）
-    cam_base64, grayscale_cam = generate_cam_base64(model, input_tensor, original_image)
+    cam_base64, grayscale_cam = generate_cam_base64(model, input_tensor, metadata)
 
     # 4. 从 CAM 热力图中提取真实的结节边界框
     original_h = metadata["rows"]
