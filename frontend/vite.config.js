@@ -1,10 +1,20 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { viteCommonjs } from '@originjs/vite-plugin-commonjs'
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), viteCommonjs()],
+  resolve: {
+    alias: {
+      events: 'events/',
+    },
+  },
   optimizeDeps: {
-    include: ['dicom-parser'],
+    exclude: ['@cornerstonejs/dicom-image-loader'],
+    include: ['dicom-parser', 'events'],
+  },
+  worker: {
+    format: 'es',
   },
   server: {
     port: 5173,
