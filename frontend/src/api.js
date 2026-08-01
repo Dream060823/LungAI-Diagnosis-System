@@ -31,3 +31,33 @@ export async function apiRequest(path, options = {}) {
     window.clearTimeout(timeout)
   }
 }
+
+export async function apiBlob(path, options = {}) {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 60_000)
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      const type = response.headers.get('content-type') || ''
+      const body = type.includes('application/json')
+        ? await response.json()
+        : await response.text()
+      const message = typeof body === 'object' ? body.error || body.message : body
+      throw new Error(message || `请求失败（${response.status}）`)
+    }
+
+    return response.blob()
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('影像加载超时，请确认后端服务是否正常运行')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}

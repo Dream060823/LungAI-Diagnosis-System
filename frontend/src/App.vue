@@ -39,7 +39,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-vue-next'
-import { apiRequest } from './api'
+import { apiBlob, apiRequest } from './api'
 import { parseDicomFile } from './dicom'
 
 const currentView = ref('workspace')
@@ -270,6 +270,8 @@ async function loadHistory() {
 
 async function openHistoryCase(item) {
   requestError.value = ''
+  viewerError.value = ''
+  operation.value = 'reading'
   try {
     const response = await apiRequest(`/api/cases/${item.case_id}`)
     selectedCase.value = response.case
@@ -278,11 +280,27 @@ async function openHistoryCase(item) {
     analysis.value = response.case.analysis || null
     currentView.value = 'workspace'
     mobileNavOpen.value = false
-    drawEmptyViewer()
+    patientId.value = response.case.patient_id || ''
+    patientName.value = response.case.patient_name || ''
     await nextTick()
+    try {
+      const blob = await apiBlob(`/api/cases/${item.case_id}/image`)
+      const file = new File([blob], response.case.filename || 'image.dcm', {
+        type: 'application/dicom',
+      })
+      const parsed = await parseDicomFile(file)
+      parsedDicom.value = parsed
+      drawDicom(parsed)
+    } catch (error) {
+      parsedDicom.value = null
+      viewerError.value = `历史影像加载失败：${error.message}`
+      drawEmptyViewer()
+    }
     drawAnnotations()
   } catch (error) {
     requestError.value = error.message
+  } finally {
+    operation.value = 'idle'
   }
 }
 
