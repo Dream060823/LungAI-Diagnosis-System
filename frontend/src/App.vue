@@ -21,10 +21,8 @@ import {
   Layers3,
   LoaderCircle,
   Menu,
-  Minus,
   PanelLeftClose,
   Play,
-  Plus,
   RefreshCw,
   ScanLine,
   Search,
@@ -608,8 +606,8 @@ onMounted(() => {
                 <p v-if="viewerError" class="field-notice"><BadgeInfo :size="14" />{{ viewerError }}</p>
 
                 <div class="patient-fields">
-                  <label><span>患者编号 <small>可选</small></span><div><Hash :size="15" /><input v-model="patientId" placeholder="自动读取或手动输入" /></div></label>
-                  <label><span>患者姓名 <small>可选</small></span><div><UserRound :size="15" /><input v-model="patientName" placeholder="自动读取或手动输入" /></div></label>
+                  <label><span>患者编号 <small>可选</small></span><label><Hash :size="15" /><input v-model="patientId" placeholder="自动读取或手动输入" /></label></label>
+                  <label><span>患者姓名 <small>可选</small></span><label><UserRound :size="15" /><input v-model="patientName" placeholder="自动读取或手动输入" /></label></label>
                 </div>
 
                 <button v-if="!uploadedCase" class="primary-button" :disabled="!canUpload" @click="uploadCase">
