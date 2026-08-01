@@ -222,3 +222,6 @@ archive/
 test_results/
 models/*.pth
 data/
+node_modules/
+.npm-cache/
+.pnpm-store/

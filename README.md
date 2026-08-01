@@ -27,6 +27,16 @@ The system aims to assist doctors in CT image analysis through artificial intell
 ### Frontend
 - Vue3
 
+The clinical workstation frontend is located in [`frontend/`](frontend/). It
+includes DICOM preview, case upload, AI analysis, structured reports, and case
+history views.
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
 ### AI
 - Deep Learning
 - Medical Image Processing
