@@ -116,6 +116,19 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .viewer-empty-hint { display: grid; justify-items: center; gap: 7px; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--teal); text-align: center; z-index: 3; pointer-events: none; }
 .viewer-empty-hint strong { color: #b9cdca; font-size: 12px; }
 .viewer-empty-hint span { color: var(--muted-2); font-size: 9px; }
+
+/* ===== ZIP 序列切片浏览 ===== */
+.viewer-stage--series { touch-action: none; cursor: grab; }
+.viewer-stage--dragging { cursor: grabbing; }
+.viewer-stage--dragging .viewer-image { transition: none; }
+.slice-badge { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 5px; padding: 4px 10px; border: 1px solid rgba(79, 215, 192, .3); background: rgba(5, 16, 18, .82); border-radius: 999px; color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; letter-spacing: .08em; z-index: 5; pointer-events: none; }
+.slice-hint { position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 5px; color: rgba(193, 215, 212, .45); font-size: 8.5px; letter-spacing: .04em; z-index: 5; pointer-events: none; white-space: nowrap; }
+.slice-loading { position: absolute; top: 44px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 7px; padding: 5px 12px; border-radius: 999px; background: rgba(5, 16, 18, .9); border: 1px solid var(--border); color: var(--muted); font-size: 9px; z-index: 6; pointer-events: none; }
+.slice-bar { padding: 9px 14px; display: flex; align-items: center; gap: 11px; border-top: 1px solid var(--border); background: #081214; }
+.slice-bar .icon-button { width: 30px; height: 30px; flex-shrink: 0; }
+.slice-bar .icon-button:disabled { opacity: .3; cursor: not-allowed; }
+.slice-slider { flex: 1; min-width: 0; }
+.slice-counter { min-width: 74px; text-align: center; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9.5px; letter-spacing: .05em; flex-shrink: 0; }
 .viewer-controls { min-height: 61px; padding: 10px 15px; display: grid; grid-template-columns: repeat(3, 1fr) auto; align-items: center; gap: 13px; border-top: 1px solid var(--border); }
 .viewer-controls label { display: grid; grid-template-columns: 16px auto 1fr; align-items: center; gap: 8px; color: var(--muted); font-size: 9px; }
 .viewer-controls label.disabled { opacity: .35; }

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Activity,
   AlertTriangle,
@@ -8,11 +8,13 @@ import {
   BrainCircuit,
   CalendarDays,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   CircleUserRound,
   Clock3,
   Database,
   Eye,
+  FileArchive,
   FileImage,
   FileUp,
   Hash,
@@ -21,6 +23,7 @@ import {
   Layers3,
   LoaderCircle,
   Menu,
+  MousePointer2,
   PanelLeftClose,
   Play,
   RefreshCw,
@@ -41,19 +44,18 @@ import {
 } from 'lucide-vue-next'
 import { apiRequest } from './api'
 import { parseDicomFile } from './dicom'
+import { readZipSlices } from './zipReader'
 
 const currentView = ref('workspace')
 const mobileNavOpen = ref(false)
 const backendOnline = ref(null)
 const checkingHealth = ref(false)
 const draggedOver = ref(false)
-const selectedFile = ref(null)
 const patientId = ref('')
 const patientName = ref('')
 const fileError = ref('')
 const viewerError = ref('')
 const requestError = ref('')
-const parsedDicom = ref(null)
 const uploadedCase = ref(null)
 const analysis = ref(null)
 const operation = ref('idle')
@@ -70,6 +72,17 @@ const imageCanvas = ref(null)
 const markCanvas = ref(null)
 const fileInput = ref(null)
 
+// ===== CT 序列（ZIP 导入）状态 =====
+const series = ref(null)
+const sliceIndex = ref(0)
+const sliceMeta = ref(null)
+const sliceDragging = ref(false)
+const sliceCache = new Map()
+const SLICE_CACHE_LIMIT = 96
+let sliceRenderToken = 0
+let sliceDragState = null
+const DRAG_STEP_PX = 14
+
 const navigation = [
   { id: 'workspace', label: '影像工作台', icon: ScanLine },
   { id: 'history', label: '病例记录', icon: History },
@@ -79,15 +92,18 @@ const navigation = [
 const workflowStep = computed(() => {
   if (analysis.value) return 3
   if (uploadedCase.value) return 2
-  if (selectedFile.value) return 1
+  if (series.value) return 1
   return 0
 })
 
 const isBusy = computed(() => ['uploading', 'analyzing'].includes(operation.value))
-const canUpload = computed(() => selectedFile.value && !isBusy.value)
+const sliceCount = computed(() => series.value?.slices.length || 0)
+const currentSlice = computed(() => series.value?.slices[sliceIndex.value] || null)
+const currentIsDicom = computed(() => currentSlice.value?.kind === 'dicom')
+const canUpload = computed(() => series.value && currentIsDicom.value && !isBusy.value && !uploadedCase.value)
 const canAnalyze = computed(() => uploadedCase.value && !analysis.value && !isBusy.value)
 const currentCase = computed(() => uploadedCase.value || selectedCase.value)
-const dicomMeta = computed(() => currentCase.value?.dicom_metadata || parsedDicom.value?.metadata || {})
+const dicomMeta = computed(() => currentCase.value?.dicom_metadata || sliceMeta.value || {})
 const nodules = computed(() => analysis.value?.nodules || currentCase.value?.analysis?.nodules || [])
 
 const filteredHistory = computed(() => {
@@ -159,48 +175,64 @@ function onFileChange(event) {
   event.target.value = ''
 }
 
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.bmp', '.webp']
+const isImageFile = (name) => IMAGE_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext))
+const isDicomFile = (name) => ['.dcm', '.dicom'].some((ext) => name.toLowerCase().endsWith(ext))
+
 async function handleFile(file) {
   fileError.value = ''
   viewerError.value = ''
   requestError.value = ''
 
-  if (!file.name.toLowerCase().endsWith('.dcm')) {
-    fileError.value = '请选择 .dcm 格式的 DICOM 单张切片'
+  const lowerName = file.name.toLowerCase()
+  const slices = []
+
+  if (lowerName.endsWith('.zip')) {
+    operation.value = 'reading'
+    try {
+      const zipSlices = await readZipSlices(file)
+      slices.push(...zipSlices)
+    } catch (error) {
+      fileError.value = error.message
+      operation.value = 'idle'
+      return
+    }
+  } else if (isDicomFile(lowerName) || isImageFile(lowerName)) {
+    slices.push({
+      name: file.name,
+      path: file.name,
+      kind: isDicomFile(lowerName) ? 'dicom' : 'image',
+      mime: isDicomFile(lowerName) ? 'application/dicom' : file.type || 'image/png',
+      size: file.size,
+      read: async () => new Uint8Array(await file.arrayBuffer()),
+    })
+  } else {
+    fileError.value = '请导入 ZIP 压缩包（内含 CT 切片）或单张 .dcm / 影像文件'
     return
   }
 
-  if (file.size > 512 * 1024 * 1024) {
-    fileError.value = '文件超过后端允许的 512 MB 上限'
-    return
-  }
-
-  selectedFile.value = file
   uploadedCase.value = null
   analysis.value = null
   selectedCase.value = null
-  parsedDicom.value = null
-  operation.value = 'reading'
-
-  try {
-    const parsed = await parseDicomFile(file)
-    parsedDicom.value = parsed
-    if (!patientId.value) patientId.value = parsed.metadata.patientId
-    if (!patientName.value) patientName.value = parsed.metadata.patientName
-    await nextTick()
-    drawDicom(parsed)
-  } catch (error) {
-    viewerError.value = `${error.message}，仍可上传至后端处理。`
-    drawEmptyViewer()
-  } finally {
-    operation.value = 'idle'
+  sliceCache.clear()
+  sliceMeta.value = null
+  resetViewer()
+  series.value = {
+    fileName: file.name,
+    fileSize: file.size,
+    source: lowerName.endsWith('.zip') ? 'zip' : 'single',
+    slices,
   }
+  await showSlice(0)
 }
 
-function removeFile() {
-  selectedFile.value = null
+function removeSeries() {
+  series.value = null
+  sliceIndex.value = 0
+  sliceMeta.value = null
+  sliceCache.clear()
   uploadedCase.value = null
   analysis.value = null
-  parsedDicom.value = null
   requestError.value = ''
   viewerError.value = ''
   patientId.value = ''
@@ -209,16 +241,162 @@ function removeFile() {
   drawEmptyViewer()
 }
 
-async function uploadCase() {
-  if (!selectedFile.value) return
-  operation.value = 'uploading'
-  requestError.value = ''
-  const form = new FormData()
-  form.append('file', selectedFile.value)
-  if (patientId.value.trim()) form.append('patient_id', patientId.value.trim())
-  if (patientName.value.trim()) form.append('patient_name', patientName.value.trim())
+// ===== 切片渲染：惰性解压 + FIFO 缓存 =====
+function cacheSlice(index, rendered) {
+  sliceCache.set(index, rendered)
+  while (sliceCache.size > SLICE_CACHE_LIMIT) {
+    sliceCache.delete(sliceCache.keys().next().value)
+  }
+}
+
+async function showSlice(index) {
+  if (!series.value) return
+  const target = Math.min(Math.max(index, 0), series.value.slices.length - 1)
+  sliceIndex.value = target
+  const token = ++sliceRenderToken
+  operation.value = 'reading'
+  viewerError.value = ''
 
   try {
+    let rendered = sliceCache.get(target)
+    const slice = series.value.slices[target]
+
+    if (!rendered) {
+      const bytes = await slice.read()
+      if (token !== sliceRenderToken) return
+
+      if (slice.kind === 'dicom') {
+        try {
+          const parsed = await parseDicomFile(new Blob([bytes]))
+          rendered = { type: 'dicom', ...parsed }
+        } catch (error) {
+          viewerError.value = `${slice.name}：${error.message}`
+          drawEmptyViewer()
+          return
+        }
+      } else {
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: slice.mime }))
+        if (token !== sliceRenderToken) {
+          bitmap.close?.()
+          return
+        }
+        rendered = { type: 'image', bitmap, width: bitmap.width, height: bitmap.height, metadata: null }
+      }
+      cacheSlice(target, rendered)
+    }
+
+    if (token !== sliceRenderToken) return
+    sliceMeta.value = rendered.metadata || null
+
+    if (!patientId.value && rendered.metadata?.patientId) patientId.value = rendered.metadata.patientId
+    if (!patientName.value && rendered.metadata?.patientName) patientName.value = rendered.metadata.patientName
+
+    drawSlice(rendered)
+  } finally {
+    if (token === sliceRenderToken) operation.value = 'idle'
+  }
+}
+
+function drawSlice(rendered) {
+  const canvas = imageCanvas.value
+  if (!canvas) return
+  canvas.width = rendered.width
+  canvas.height = rendered.height
+  const context = canvas.getContext('2d')
+  if (rendered.type === 'dicom') {
+    context.putImageData(rendered.imageData, 0, 0)
+  } else {
+    context.drawImage(rendered.bitmap, 0, 0, rendered.width, rendered.height)
+  }
+  drawAnnotations()
+}
+
+function changeSlice(delta) {
+  if (!series.value || sliceCount.value < 2) return
+  showSlice(sliceIndex.value + delta)
+}
+
+function onSliceInput(event) {
+  showSlice(Number(event.target.value))
+}
+
+// 滚轮翻阅切片
+function onViewerWheel(event) {
+  if (!series.value || sliceCount.value < 2) return
+  changeSlice(event.deltaY > 0 ? 1 : -1)
+}
+
+// 拖动翻阅切片：按住影像上下（或左右）拖动即可切换切片
+function onPointerDown(event) {
+  if (!series.value || sliceCount.value < 2) return
+  if (event.button !== 0) return
+  sliceDragState = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    startIndex: sliceIndex.value,
+  }
+  sliceDragging.value = true
+  try {
+    event.currentTarget.setPointerCapture(event.pointerId)
+  } catch {
+    /* 某些环境不支持指针捕获时忽略 */
+  }
+}
+
+function onPointerMove(event) {
+  if (!sliceDragState || event.pointerId !== sliceDragState.pointerId) return
+  const deltaX = event.clientX - sliceDragState.startX
+  const deltaY = event.clientY - sliceDragState.startY
+  const offset = Math.abs(deltaX) > Math.abs(deltaY) ? deltaX : deltaY
+  const steps = Math.round(-offset / DRAG_STEP_PX)
+  const target = Math.min(
+    Math.max(sliceDragState.startIndex + steps, 0),
+    sliceCount.value - 1,
+  )
+  if (target !== sliceIndex.value) {
+    sliceIndex.value = target
+    showSlice(target)
+  }
+}
+
+function endSliceDrag(event) {
+  if (sliceDragState && event?.pointerId !== undefined && event?.pointerId !== sliceDragState.pointerId) return
+  sliceDragState = null
+  sliceDragging.value = false
+}
+
+function onKeydown(event) {
+  if (currentView.value !== 'workspace' || !series.value) return
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    changeSlice(-1)
+  } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    event.preventDefault()
+    changeSlice(1)
+  }
+}
+
+async function buildUploadFile() {
+  const slice = currentSlice.value
+  if (!slice || slice.kind !== 'dicom') return null
+  const bytes = await slice.read()
+  return new File([bytes], slice.name, { type: 'application/dicom' })
+}
+
+async function uploadCase() {
+  if (!canUpload.value) return
+  operation.value = 'uploading'
+  requestError.value = ''
+
+  try {
+    const file = await buildUploadFile()
+    if (!file) throw new Error('当前切片不是 DICOM 文件，无法上传')
+    const form = new FormData()
+    form.append('file', file)
+    if (patientId.value.trim()) form.append('patient_id', patientId.value.trim())
+    if (patientName.value.trim()) form.append('patient_name', patientName.value.trim())
+
     const response = await apiRequest('/api/upload', { method: 'POST', body: form })
     uploadedCase.value = response.case
     backendOnline.value = true
@@ -274,7 +452,10 @@ async function openHistoryCase(item) {
     const response = await apiRequest(`/api/cases/${item.case_id}`)
     selectedCase.value = response.case
     uploadedCase.value = null
-    selectedFile.value = null
+    series.value = null
+    sliceIndex.value = 0
+    sliceMeta.value = null
+    sliceCache.clear()
     analysis.value = response.case.analysis || null
     currentView.value = 'workspace'
     mobileNavOpen.value = false
@@ -290,17 +471,12 @@ function selectView(view) {
   currentView.value = view
   mobileNavOpen.value = false
   if (view === 'history') loadHistory()
-  if (view === 'workspace') nextTick(() => (parsedDicom.value ? drawDicom(parsedDicom.value) : drawEmptyViewer()))
-}
-
-function drawDicom(parsed) {
-  const canvas = imageCanvas.value
-  if (!canvas) return
-  canvas.width = parsed.width
-  canvas.height = parsed.height
-  const context = canvas.getContext('2d')
-  context.putImageData(parsed.imageData, 0, 0)
-  drawAnnotations()
+  if (view === 'workspace') {
+    nextTick(() => {
+      if (series.value) showSlice(sliceIndex.value)
+      else drawEmptyViewer()
+    })
+  }
 }
 
 function drawEmptyViewer() {
@@ -338,10 +514,10 @@ function drawEmptyViewer() {
   context.fillStyle = 'rgba(133, 161, 164, .55)'
   context.textAlign = 'center'
   context.font = '500 20px Inter, sans-serif'
-  context.fillText('等待载入 DICOM 影像', size / 2, size / 2 - 2)
+  context.fillText('等待载入 CT 影像序列', size / 2, size / 2 - 2)
   context.fillStyle = 'rgba(133, 161, 164, .32)'
   context.font = '400 14px Inter, sans-serif'
-  context.fillText('DROP .DCM FILE TO PREVIEW', size / 2, size / 2 + 30)
+  context.fillText('DROP ZIP SERIES OR .DCM FILE TO PREVIEW', size / 2, size / 2 + 30)
   drawAnnotations()
 }
 
@@ -392,6 +568,11 @@ watch(
 onMounted(() => {
   drawEmptyViewer()
   checkBackend()
+  window.addEventListener('keydown', onKeydown)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
 })
 </script>
 
@@ -433,7 +614,7 @@ onMounted(() => {
         </div>
         <div class="version-row">
           <span>Clinical preview</span>
-          <span>v1.0</span>
+          <span>v1.1</span>
         </div>
       </div>
     </aside>
@@ -487,7 +668,7 @@ onMounted(() => {
               <h2>从影像上传到结构化结论，<br /><em>让每一步都清晰可见。</em></h2>
             </div>
             <div class="workflow-track" aria-label="分析流程">
-              <div v-for="(step, index) in ['载入影像', '上传病例', 'AI 分析', '查看报告']" :key="step" class="workflow-step">
+              <div v-for="(step, index) in ['载入序列', '上传病例', 'AI 分析', '查看报告']" :key="step" class="workflow-step">
                 <span :class="{ complete: workflowStep > index, current: workflowStep === index }">
                   <CheckCircle2 v-if="workflowStep > index" :size="15" />
                   <template v-else>{{ index + 1 }}</template>
@@ -502,7 +683,10 @@ onMounted(() => {
               <div class="panel__header viewer-header">
                 <div>
                   <span class="panel__index">01</span>
-                  <div><h3>CT 影像阅片</h3><p>{{ selectedFile?.name || currentCase?.filename || '尚未载入影像' }}</p></div>
+                  <div>
+                    <h3>CT 影像阅片</h3>
+                    <p>{{ series?.fileName || currentCase?.filename || '尚未载入影像' }}</p>
+                  </div>
                 </div>
                 <div class="viewer-tools">
                   <button class="icon-button" aria-label="缩小" @click="zoom = Math.max(0.6, zoom - 0.1)"><ZoomOut :size="17" /></button>
@@ -512,7 +696,15 @@ onMounted(() => {
                 </div>
               </div>
 
-              <div class="viewer-stage">
+              <div
+                class="viewer-stage"
+                :class="{ 'viewer-stage--series': series && sliceCount > 1, 'viewer-stage--dragging': sliceDragging }"
+                @wheel.prevent="onViewerWheel"
+                @pointerdown="onPointerDown"
+                @pointermove="onPointerMove"
+                @pointerup="endSliceDrag"
+                @pointercancel="endSliceDrag"
+              >
                 <div class="viewer-stage__meta viewer-stage__meta--top">
                   <span>{{ dicomMeta.modality || 'CT' }}</span>
                   <span>{{ currentCase?.patient_id || patientId || 'ANONYMOUS' }}</span>
@@ -540,11 +732,41 @@ onMounted(() => {
                   <span>WL {{ dicomMeta.window_center || dicomMeta.windowCenter || '—' }}</span>
                   <span>{{ dicomMeta.slice_thickness || dicomMeta.sliceThickness || '—' }} mm</span>
                 </div>
-                <div v-if="!selectedFile && !selectedCase" class="viewer-empty-hint">
-                  <ScanLine :size="24" />
-                  <strong>载入 DICOM 影像开始阅片</strong>
-                  <span>支持 8/16 位单通道 CT 切片浏览器预览</span>
+
+                <div v-if="series && sliceCount > 1" class="slice-badge" aria-live="polite">
+                  <Layers3 :size="12" /> IM {{ sliceIndex + 1 }} / {{ sliceCount }}
                 </div>
+                <div v-if="series && sliceCount > 1 && !sliceDragging" class="slice-hint">
+                  <MousePointer2 :size="12" /> 拖动 / 滚轮 / 方向键翻阅切片
+                </div>
+                <div v-if="operation === 'reading'" class="slice-loading">
+                  <LoaderCircle class="spin" :size="16" /> 正在解析切片…
+                </div>
+                <div v-if="!series && !selectedCase" class="viewer-empty-hint">
+                  <ScanLine :size="24" />
+                  <strong>载入 CT 影像序列开始阅片</strong>
+                  <span>支持导入 ZIP 压缩包或单张 .dcm 切片浏览器预览</span>
+                </div>
+              </div>
+
+              <div v-if="series && sliceCount > 1" class="slice-bar">
+                <button class="icon-button" aria-label="上一张切片" :disabled="sliceIndex === 0" @click="changeSlice(-1)">
+                  <ChevronLeft :size="16" />
+                </button>
+                <input
+                  class="slice-slider"
+                  type="range"
+                  min="0"
+                  :max="sliceCount - 1"
+                  step="1"
+                  :value="sliceIndex"
+                  :aria-label="`切片序号，共 ${sliceCount} 张`"
+                  @input="onSliceInput"
+                />
+                <span class="slice-counter">切片 {{ sliceIndex + 1 }} / {{ sliceCount }}</span>
+                <button class="icon-button" aria-label="下一张切片" :disabled="sliceIndex >= sliceCount - 1" @click="changeSlice(1)">
+                  <ChevronRight :size="16" />
+                </button>
               </div>
 
               <div class="viewer-controls">
@@ -577,12 +799,12 @@ onMounted(() => {
             <div class="control-column">
               <div class="upload-card panel">
                 <div class="panel__header">
-                  <div><span class="panel__index">02</span><div><h3>病例与影像</h3><p>DICOM 单张切片</p></div></div>
+                  <div><span class="panel__index">02</span><div><h3>病例与影像</h3><p>ZIP 序列或 DICOM 单片</p></div></div>
                 </div>
 
-                <input ref="fileInput" type="file" accept=".dcm,application/dicom" hidden @change="onFileChange" />
+                <input ref="fileInput" type="file" accept=".zip,.dcm,.dicom,.png,.jpg,.jpeg,.bmp,.webp" hidden @change="onFileChange" />
                 <button
-                  v-if="!selectedFile"
+                  v-if="!series"
                   class="dropzone"
                   :class="{ 'dropzone--active': draggedOver }"
                   @click="openFilePicker"
@@ -591,19 +813,29 @@ onMounted(() => {
                   @drop.prevent="onDrop"
                 >
                   <span class="dropzone__icon"><UploadCloud :size="25" /></span>
-                  <strong>拖放 DICOM 影像到这里</strong>
-                  <span>或点击从本地选择 .dcm 文件</span>
-                  <small>单文件最大 512 MB</small>
+                  <strong>拖放 ZIP 影像序列或 DICOM 文件到这里</strong>
+                  <span>导入整个 ZIP 压缩包可拖动浏览全部肺部 CT 切片</span>
+                  <small>支持 .zip（内含 .dcm / .png / .jpg 序列）或单张 .dcm</small>
                 </button>
 
                 <div v-else class="selected-file">
-                  <div class="selected-file__icon"><FileImage :size="22" /></div>
-                  <div><strong>{{ selectedFile.name }}</strong><span>{{ formatBytes(selectedFile.size) }} · DICOM</span></div>
-                  <button class="icon-button" aria-label="移除文件" :disabled="isBusy" @click="removeFile"><X :size="16" /></button>
+                  <div class="selected-file__icon">
+                    <FileArchive v-if="series.source === 'zip'" :size="22" />
+                    <FileImage v-else :size="22" />
+                  </div>
+                  <div>
+                    <strong>{{ series.fileName }}</strong>
+                    <span v-if="series.source === 'zip'">{{ sliceCount }} 张切片 · {{ formatBytes(series.fileSize) }} · 当前：{{ currentSlice?.name }}</span>
+                    <span v-else>{{ formatBytes(series.fileSize) }} · {{ currentIsDicom ? 'DICOM' : '影像' }}</span>
+                  </div>
+                  <button class="icon-button" aria-label="移除序列" :disabled="isBusy" @click="removeSeries"><X :size="16" /></button>
                 </div>
 
                 <p v-if="fileError" class="field-error"><AlertTriangle :size="14" />{{ fileError }}</p>
                 <p v-if="viewerError" class="field-notice"><BadgeInfo :size="14" />{{ viewerError }}</p>
+                <p v-if="series && !currentIsDicom" class="field-notice">
+                  <BadgeInfo :size="14" />当前切片为图片格式，如需 AI 分析请翻到 .dcm 切片再上传
+                </p>
 
                 <div class="patient-fields">
                   <label><span>患者编号 <small>可选</small></span><label><Hash :size="15" /><input v-model="patientId" placeholder="自动读取或手动输入" /></label></label>
@@ -613,7 +845,7 @@ onMounted(() => {
                 <button v-if="!uploadedCase" class="primary-button" :disabled="!canUpload" @click="uploadCase">
                   <LoaderCircle v-if="operation === 'uploading'" class="spin" :size="17" />
                   <FileUp v-else :size="17" />
-                  {{ operation === 'uploading' ? '正在上传影像…' : '上传并创建病例' }}
+                  {{ operation === 'uploading' ? '正在上传影像…' : (series?.source === 'zip' ? '上传当前切片并创建病例' : '上传并创建病例') }}
                 </button>
                 <button v-else-if="!analysis" class="primary-button primary-button--accent" :disabled="!canAnalyze" @click="analyzeCase">
                   <LoaderCircle v-if="operation === 'analyzing'" class="spin" :size="17" />
@@ -632,7 +864,9 @@ onMounted(() => {
                   <div><span>检查方式</span><strong>{{ dicomMeta.modality || '—' }}</strong></div>
                   <div><span>影像矩阵</span><strong>{{ dicomMeta.rows ? `${dicomMeta.rows} × ${dicomMeta.columns}` : '—' }}</strong></div>
                   <div><span>层厚</span><strong>{{ dicomMeta.slice_thickness || dicomMeta.sliceThickness ? `${dicomMeta.slice_thickness || dicomMeta.sliceThickness} mm` : '—' }}</strong></div>
+                  <div><span>切片数量</span><strong>{{ sliceCount ? `${sliceCount} 张` : '—' }}</strong></div>
                   <div><span>检查日期</span><strong>{{ formatStudyDate(dicomMeta.study_date || dicomMeta.studyDate) }}</strong></div>
+                  <div><span>当前切片</span><strong>{{ currentSlice?.name || currentCase?.filename || '—' }}</strong></div>
                 </div>
               </div>
             </div>
@@ -719,7 +953,7 @@ onMounted(() => {
           <section class="model-details-grid">
             <article class="panel model-detail"><div class="model-detail__head"><Activity :size="20" /><h3>输出内容</h3></div><ul><li><CheckCircle2 :size="16" />可疑结节数量与定位框</li><li><CheckCircle2 :size="16" />结节直径与肺叶位置</li><li><CheckCircle2 :size="16" />恶性概率与检测置信度</li><li><CheckCircle2 :size="16" />综合结论与随访建议</li></ul></article>
             <article class="panel model-detail"><div class="model-detail__head"><ShieldCheck :size="20" /><h3>使用边界</h3></div><p>模型是临床决策支持工具，不替代影像科医生。小结节、低对比度病灶与伪影可能影响输出，应结合完整序列、病史及其他检查综合判断。</p><div class="boundary-note"><AlertTriangle :size="16" />不用于急诊独立诊断或自动出具医疗结论</div></article>
-            <article class="panel model-detail"><div class="model-detail__head"><Server :size="20" /><h3>技术栈</h3></div><div class="tech-pills"><span>PyTorch</span><span>Flask</span><span>Vue 3</span><span>DICOM</span><span>ResNet-50</span><span>Grad-CAM</span></div><p>前后端解耦架构，便于模型迭代、临床界面扩展与本地化部署。</p></article>
+            <article class="panel model-detail"><div class="model-detail__head"><Server :size="20" /><h3>技术栈</h3></div><div class="tech-pills"><span>PyTorch</span><span>Flask</span><span>Vue 3</span><span>DICOM</span><span>ZIP 序列</span><span>ResNet-50</span><span>Grad-CAM</span></div><p>前后端解耦架构，便于模型迭代、临床界面扩展与本地化部署。</p></article>
           </section>
         </template>
       </div>
